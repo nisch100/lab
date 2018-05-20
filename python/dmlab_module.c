@@ -40,19 +40,18 @@
 // Glue code to make the code work with both Python 2.7 and Python 3.
 //
 #if PY_MAJOR_VERSION >= 3
-#  define PY_INIT_SIGNATURE(name) PyInit_ ## name
-#  define PY_RETURN_SUCCESS(x) return x
-#  define PY_RETURN_FAILURE    return NULL
 #  define PyInt_FromLong PyLong_FromLong
 #  define PyInt_AsLong PyLong_AsLong
 #  define PyInt_Check PyLong_Check
-#else  // PY_MAJOR_VERSION >= 3
-#  define PY_INIT_SIGNATURE(name) init ## name
-#  define PY_RETURN_SUCCESS(x) return
-#  define PY_RETURN_FAILURE    return
 #endif  // PY_MAJOR_VERSION >= 3
 
-static char runfiles_path[4096];  // set in initdeepmind_lab() below
+// In both Py2 and Py3, the LabModuleState object(s) that we will be using are
+// zero-initialized.
+typedef struct {
+  char runfiles_path[4096];  // Populated during module initialization below.
+} LabModuleState;
+
+static LabModuleState* get_module_state();  // defined below
 
 typedef struct {
   PyObject_HEAD
@@ -166,7 +165,7 @@ static int Lab_init(PyObject* pself, PyObject* args, PyObject* kwds) {
   }
   {
     DeepMindLabLaunchParams params = {};
-    params.runfiles_path = runfiles_path;
+    params.runfiles_path = get_module_state()->runfiles_path;
     params.renderer = DeepMindLabRenderer_Software;
     if (renderer != NULL && renderer[0] != '\0') {
       if (strcmp(renderer, "hardware") == 0) {
@@ -721,7 +720,7 @@ static PyTypeObject deepmind_lab_LabType = {
 };
 
 static PyObject* module_runfiles_path(PyObject* self, PyObject* no_arg) {
-  return Py_BuildValue("s", runfiles_path);
+  return Py_BuildValue("s", get_module_state()->runfiles_path);
 }
 
 static PyObject* module_set_runfiles_path(PyObject* self, PyObject* args) {
@@ -730,8 +729,8 @@ static PyObject* module_set_runfiles_path(PyObject* self, PyObject* args) {
     return NULL;
   }
 
-  if (strlen(new_path) < sizeof(runfiles_path)) {
-    strcpy(runfiles_path, new_path);
+  if (strlen(new_path) < sizeof(get_module_state()->runfiles_path)) {
+    strcpy(get_module_state()->runfiles_path, new_path);
   } else {
     PyErr_SetString(PyExc_RuntimeError, "Runfiles directory name too long!");
     return NULL;
@@ -755,85 +754,160 @@ static PyMethodDef module_methods[] = {
 };
 
 #if PY_MAJOR_VERSION >= 3
-static PyModuleDef module_def = {
-    PyModuleDef_HEAD_INIT,
-    "deepmind_lab",             /* m_name */
-    "DeepMind Lab API module",  /* m_doc */
-    -1,                         /* m_size */
-    module_methods,             /* m_methods */
-    NULL,                       /* m_reload */
-    NULL,                       /* m_traverse */
-    NULL,                       /* m_clear */
-    NULL,                       /* m_free */
-};
-#endif  // PY_MAJOR_VERSION >= 3
+static PyObject* dmlab_create_mod(PyObject* spec, PyModuleDef* def) {
+  PyObject* modname = PyObject_GetAttrString(spec, "name");
+  if (modname == NULL) return NULL;
 
-PyMODINIT_FUNC PY_INIT_SIGNATURE(deepmind_lab)(void) {
-  PyObject* m;
+  PyObject* module = PyModule_NewObject(modname);
+  Py_DECREF(modname);
+  if (module == NULL) return NULL;
 
-  if (PyType_Ready(&deepmind_lab_LabType) < 0) PY_RETURN_FAILURE;
+  PyObject* moddict = PyModule_GetDict(module);
+  PyObject* v = PyObject_GetAttrString(spec, "origin");
+  if (v == NULL) return NULL;
+  printf("Got origin value '%s'\n", PyBytes_AsString(PyUnicode_EncodeFSDefault(v)));
+  int res = PyDict_SetItemString(moddict, "__file__", v);
+  Py_DECREF(v);
+  if (res != 0) return NULL;
 
-#if PY_MAJOR_VERSION >= 3
-  m = PyModule_Create(&module_def);
-#else  // PY_MAJOR_VERSION >= 3
-  m = Py_InitModule3("deepmind_lab", module_methods, "DeepMind Lab API module");
-#endif  // PY_MAJOR_VERSION >= 3
+  return module;
+}
 
+static int dmlab_exec_mod(PyObject* module) {
   Py_INCREF(&deepmind_lab_LabType);
-  PyModule_AddObject(m, "Lab", (PyObject*)&deepmind_lab_LabType);
+  PyModule_AddObject(module, "Lab", (PyObject*)&deepmind_lab_LabType);
+
+  LabModuleState* state = PyModule_GetState(module);
 
 #ifdef DEEPMIND_LAB_MODULE_RUNFILES_DIR
-  PyObject *v = PyObject_GetAttrString(m, "__file__");
-#if PY_MAJOR_VERSION >= 3
-  if (v && PyBytes_Check(v)) {
-    const char* file = PyBytes_AsString(v);
-#else  // PY_MAJOR_VERSION >= 3
-  if (v && PyString_Check(v)) {
-    const char* file = PyString_AsString(v);
-#endif  // PY_MAJOR_VERSION >= 3
-    if (strlen(file) < sizeof(runfiles_path)) {
-      strcpy(runfiles_path, file);
+  PyObject *v = PyObject_GetAttrString(module, "__file__");
+  if (v && PyUnicode_Check(v)) {
+    const char* file = PyBytes_AsString(PyUnicode_EncodeFSDefault(v));
+    if (strlen(file) < sizeof(state->runfiles_path)) {
+      strcpy(state->runfiles_path, file);
     } else {
       PyErr_SetString(PyExc_RuntimeError, "Runfiles directory name too long!");
-      PY_RETURN_FAILURE;
+      return -1;
     }
 
-    char* last_slash = strrchr(runfiles_path, '/');
+    char* last_slash = strrchr(state->runfiles_path, '/');
     if (last_slash != NULL) {
       *last_slash = '\0';
     } else {
       PyErr_SetString(PyExc_RuntimeError,
                       "Unable to determine runfiles directory!");
-      PY_RETURN_FAILURE;
+      return -1;
     }
   } else {
-    strcpy(runfiles_path, ".");
+    fprintf(stderr, "Failed to get __file__ attribute.\n");
+    PyErr_Clear();
+    strcpy(state->runfiles_path, ".");
   }
 #else
-#if PY_MAJOR_VERSION >= 3
   PyObject* u = PyUnicode_FromWideChar(Py_GetProgramFullPath(), -1);
-  if (u == NULL) PY_RETURN_FAILURE;
+  if (u == NULL) return -1;
 
   PyObject* p = PyUnicode_EncodeFSDefault(u);
   const char* s = PyBytes_AsString(p);
   size_t n = PyBytes_Size(p);
-#else  // PY_MAJOR_VERSION >= 3
-  const char* s = Py_GetProgramFullPath();
-  size_t n = strlen(s);
-#endif  // PY_MAJOR_VERSION >= 3
   static const char kRunfiles[] = ".runfiles/org_deepmind_lab";
   if (n + strlen(kRunfiles) < sizeof(runfiles_path)) {
     strcpy(runfiles_path, s);
     strcat(runfiles_path, kRunfiles);
   } else {
     PyErr_SetString(PyExc_RuntimeError, "Runfiles directory name too long!");
-    PY_RETURN_FAILURE;
+    return -1;
   }
 #endif
 
   srand(time(NULL));
+  import_array1(-1);
+  return 0;
+}
+
+static PyModuleDef_Slot module_slots[] = {
+  {Py_mod_create, dmlab_create_mod},
+  {Py_mod_exec, dmlab_exec_mod},
+  {0, NULL},
+};
+
+static PyModuleDef module_def = {
+    PyModuleDef_HEAD_INIT,
+    "deepmind_lab",             /* m_name */
+    "DeepMind Lab API module",  /* m_doc */
+    sizeof(LabModuleState),     /* m_size */
+    module_methods,             /* m_methods */
+    module_slots,               /* m_slots */
+    NULL,                       /* m_traverse */
+    NULL,                       /* m_clear */
+    NULL,                       /* m_free */
+};
+
+PyMODINIT_FUNC PyInit_deepmind_lab(void) {
+  if (PyType_Ready(&deepmind_lab_LabType) < 0) return NULL;
+  return PyModuleDef_Init(&module_def);
+}
+
+static LabModuleState* get_module_state() {
+  PyObject* m = PyState_FindModule(&module_def);
+  return PyModule_GetState(m);
+}
+
+#else  // PY_MAJOR_VERSION >= 3
+
+static LabModuleState singleton_mod_state;
+static LabModuleState* get_module_state() { return &singleton_mod_state; }
+
+PyMODINIT_FUNC initdeepmind_lab(void) {
+  if (PyType_Ready(&deepmind_lab_LabType) < 0) return;
+
+  PyObject* m =
+      Py_InitModule3("deepmind_lab", module_methods, "DeepMind Lab API module");
+
+  if (m == NULL) return;
+
+  Py_INCREF(&deepmind_lab_LabType);
+  PyModule_AddObject(m, "Lab", (PyObject*)&deepmind_lab_LabType);
+
+#ifdef DEEPMIND_LAB_MODULE_RUNFILES_DIR
+  PyObject *v = PyObject_GetAttrString(m, "__file__");
+  if (v && PyString_Check(v)) {
+    const char* file = PyString_AsString(v);
+    if (strlen(file) < sizeof(get_module_state()->runfiles_path)) {
+      strcpy(get_module_state()->runfiles_path, file);
+    } else {
+      PyErr_SetString(PyExc_RuntimeError, "Runfiles directory name too long!");
+      return;
+    }
+
+    char* last_slash = strrchr(get_module_state()->runfiles_path, '/');
+    if (last_slash != NULL) {
+      *last_slash = '\0';
+    } else {
+      PyErr_SetString(PyExc_RuntimeError,
+                      "Unable to determine runfiles directory!");
+      return;
+    }
+  } else {
+    fprintf(stderr, "Failed to get __file__ attribute.\n");
+    PyErr_Clear();
+    strcpy(get_module_state()->runfiles_path, ".");
+  }
+#else  // DEEPMIND_LAB_MODULE_RUNFILES_DIR
+  const char* s = Py_GetProgramFullPath();
+  size_t n = strlen(s);
+  static const char kRunfiles[] = ".runfiles/org_deepmind_lab";
+  if (n + strlen(kRunfiles) < sizeof(get_module_state()->runfiles_path)) {
+    strcpy(get_module_state()->runfiles_path, s);
+    strcat(get_module_state()->runfiles_path, kRunfiles);
+  } else {
+    PyErr_SetString(PyExc_RuntimeError, "Runfiles directory name too long!");
+    return;
+  }
+#endif  // DEEPMIND_LAB_MODULE_RUNFILES_DIR
+
+  srand(time(NULL));
 
   import_array();
-
-  PY_RETURN_SUCCESS(m);
 }
+#endif  // PY_MAJOR_VERSION >= 3
