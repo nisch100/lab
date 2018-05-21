@@ -51,7 +51,7 @@ typedef struct {
   char runfiles_path[4096];  // Populated during module initialization below.
 } LabModuleState;
 
-static LabModuleState* get_module_state();  // defined below
+static LabModuleState* get_module_state(PyObject* module);  // defined below
 
 typedef struct {
   PyObject_HEAD
@@ -164,8 +164,18 @@ static int Lab_init(PyObject* pself, PyObject* args, PyObject* kwds) {
     return -1;
   }
   {
+#if PY_MAJOR_VERSION >= 3
+    PyObject* module = PyImport_AddModule("deepmind_lab");
+    if (module == NULL) {
+      PyErr_SetString(PyExc_RuntimeError, "deepmind_lab module not loaded");
+      return -1;
+    }
+#else  // PY_MAJOR_VERSION >= 3
+    PyObject* module = NULL;
+#endif  // PY_MAJOR_VERSION >= 3
+
     DeepMindLabLaunchParams params = {};
-    params.runfiles_path = get_module_state()->runfiles_path;
+    params.runfiles_path = get_module_state(module)->runfiles_path;
     params.renderer = DeepMindLabRenderer_Software;
     if (renderer != NULL && renderer[0] != '\0') {
       if (strcmp(renderer, "hardware") == 0) {
@@ -720,7 +730,7 @@ static PyTypeObject deepmind_lab_LabType = {
 };
 
 static PyObject* module_runfiles_path(PyObject* self, PyObject* no_arg) {
-  return Py_BuildValue("s", get_module_state()->runfiles_path);
+  return Py_BuildValue("s", get_module_state(self)->runfiles_path);
 }
 
 static PyObject* module_set_runfiles_path(PyObject* self, PyObject* args) {
@@ -729,8 +739,8 @@ static PyObject* module_set_runfiles_path(PyObject* self, PyObject* args) {
     return NULL;
   }
 
-  if (strlen(new_path) < sizeof(get_module_state()->runfiles_path)) {
-    strcpy(get_module_state()->runfiles_path, new_path);
+  if (strlen(new_path) < sizeof(get_module_state(self)->runfiles_path)) {
+    strcpy(get_module_state(self)->runfiles_path, new_path);
   } else {
     PyErr_SetString(PyExc_RuntimeError, "Runfiles directory name too long!");
     return NULL;
@@ -848,15 +858,16 @@ PyMODINIT_FUNC PyInit_deepmind_lab(void) {
   return PyModuleDef_Init(&module_def);
 }
 
-static LabModuleState* get_module_state() {
-  PyObject* m = PyState_FindModule(&module_def);
-  return PyModule_GetState(m);
+static LabModuleState* get_module_state(PyObject* module) {
+  return PyModule_GetState(module);
 }
 
 #else  // PY_MAJOR_VERSION >= 3
 
 static LabModuleState singleton_mod_state;
-static LabModuleState* get_module_state() { return &singleton_mod_state; }
+static LabModuleState* get_module_state(PyObject* module) {
+  return &singleton_mod_state;
+}
 
 PyMODINIT_FUNC initdeepmind_lab(void) {
   if (PyType_Ready(&deepmind_lab_LabType) < 0) return;
@@ -873,14 +884,14 @@ PyMODINIT_FUNC initdeepmind_lab(void) {
   PyObject *v = PyObject_GetAttrString(m, "__file__");
   if (v && PyString_Check(v)) {
     const char* file = PyString_AsString(v);
-    if (strlen(file) < sizeof(get_module_state()->runfiles_path)) {
-      strcpy(get_module_state()->runfiles_path, file);
+    if (strlen(file) < sizeof(get_module_state(m)->runfiles_path)) {
+      strcpy(get_module_state(m)->runfiles_path, file);
     } else {
       PyErr_SetString(PyExc_RuntimeError, "Runfiles directory name too long!");
       return;
     }
 
-    char* last_slash = strrchr(get_module_state()->runfiles_path, '/');
+    char* last_slash = strrchr(get_module_state(m)->runfiles_path, '/');
     if (last_slash != NULL) {
       *last_slash = '\0';
     } else {
@@ -891,15 +902,15 @@ PyMODINIT_FUNC initdeepmind_lab(void) {
   } else {
     fprintf(stderr, "Failed to get __file__ attribute.\n");
     PyErr_Clear();
-    strcpy(get_module_state()->runfiles_path, ".");
+    strcpy(get_module_state(m)->runfiles_path, ".");
   }
 #else  // DEEPMIND_LAB_MODULE_RUNFILES_DIR
   const char* s = Py_GetProgramFullPath();
   size_t n = strlen(s);
   static const char kRunfiles[] = ".runfiles/org_deepmind_lab";
-  if (n + strlen(kRunfiles) < sizeof(get_module_state()->runfiles_path)) {
-    strcpy(get_module_state()->runfiles_path, s);
-    strcat(get_module_state()->runfiles_path, kRunfiles);
+  if (n + strlen(kRunfiles) < sizeof(get_module_state(m)->runfiles_path)) {
+    strcpy(get_module_state(m)->runfiles_path, s);
+    strcat(get_module_state(m)->runfiles_path, kRunfiles);
   } else {
     PyErr_SetString(PyExc_RuntimeError, "Runfiles directory name too long!");
     return;
